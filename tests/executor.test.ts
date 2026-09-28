@@ -125,6 +125,36 @@ describe('execute: REST responses', () => {
   })
 })
 
+describe('execute: retries', () => {
+  it('resends the request body when the Cloudflare API rate-limits a write', async () => {
+    mockIdentityProbe({ accounts: [{ id: ACCOUNT_ID, name: 'Acc' }] })
+    const path = `/accounts/${ACCOUNT_ID}/workers/scripts/my-worker/secrets`
+    const received: string[] = []
+    server.use(
+      http.put(`${API_BASE}${path}`, async ({ request }) => {
+        received.push(await request.text())
+        return received.length === 1
+          ? HttpResponse.json(cfError([{ code: 10429, message: 'rate limited' }]), {
+              status: 429,
+              headers: { 'Retry-After': '1' }
+            })
+          : HttpResponse.json(cfSuccess({ name: 'API_KEY', type: 'secret_text' }))
+      })
+    )
+
+    const result = await callTool(API_TOKEN, 'execute', {
+      code: `async () => cloudflare.request({ method: "PUT", path: "${path}", body: { name: "API_KEY", text: "s3cret", type: "secret_text" } })`
+    })
+
+    const text = toolText(result)
+    expect(text).toContain('"success": true')
+    expect(text).toContain('API_KEY')
+    // GlobalOutbound retried the 429 with the same body, not an already-read stream.
+    const body = JSON.stringify({ name: 'API_KEY', text: 's3cret', type: 'secret_text' })
+    expect(received).toEqual([body, body])
+  })
+})
+
 describe('execute: GraphQL responses', () => {
   async function runGraphql(body: unknown): Promise<string> {
     mockIdentityProbe({ accounts: [{ id: ACCOUNT_ID, name: 'Acc' }] })
